@@ -6,7 +6,7 @@ import {
   Download, Upload, Briefcase, User, GripVertical,
   Mic, Repeat, FileText, Link2, StickyNote, MapPin, MessageSquare,
   Paperclip, ChevronLeft, ChevronRight, Milestone,
-  List as ListIcon, Calendar as CalendarIcon, Sun, Moon, BellRing, BellOff, Sparkles, Smartphone,
+  List as ListIcon, Calendar as CalendarIcon, Sun, Moon, BellRing, BellOff, Sparkles, Smartphone, Bot, Send,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +83,14 @@ function cssVarsFor(theme) {
 const THEME_STORAGE_KEY = "vivaro:theme";
 const FIRED_REMINDERS_KEY = "vivaro:firedReminders";
 const REMINDER_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
+
+// Gemini API key: set as a Netlify environment variable named VITE_GEMINI_API_KEY
+// (Site settings → Environment variables), then trigger a new deploy. Vite bakes
+// it into the built JS at build time — it is NOT committed to the repository.
+// For safety, restrict this key by HTTP referrer to your Netlify domain in
+// Google Cloud Console → APIs & Services → Credentials.
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 const QUADRANTS = [
   { id: 1, label: "Fazer agora", sub: "Urgente + Importante", color: C.q1, soft: C.q1Soft },
@@ -251,7 +259,53 @@ function normalizeTask(t) {
   };
 }
 
-// Interpreta um comando de voz em português e extrai título, data, hora e lembrete
+// Monta um resumo compacto das tarefas para servir de contexto à IA
+function buildTasksContext(tasks) {
+  if (!tasks.length) return "Nenhuma tarefa cadastrada.";
+  const sorted = sortByPriority(tasks);
+  return sorted
+    .map((t) => {
+      const st = STATUSES.find((s) => s.id === t.status)?.label || t.status;
+      const q = QUADRANTS.find((x) => x.id === t.quadrant)?.label || "";
+      const prazo = t.dueAt ? `${fmtDate(t.dueAt)}${fmtTime(t.dueAt) ? ` ${fmtTime(t.dueAt)}` : ""}` : "sem prazo";
+      const atraso = isOverdue(t) ? " · ATRASADA" : "";
+      const sub = (t.subtasks || []).length ? ` · subtarefas ${t.subtasks.filter((s) => s.done).length}/${t.subtasks.length}` : "";
+      const resp = t.assignee ? ` · responsável: ${t.assignee}` : "";
+      const rec = t.recurrence ? ` · recorrente (${recurrenceLabel(t.recurrence)})` : "";
+      return `- [${st}] ${t.title} (${t.category}, prioridade: ${q}, prazo: ${prazo}${atraso}${sub}${resp}${rec})`;
+    })
+    .join("\n");
+}
+
+// Chama a API do Gemini diretamente do navegador (chave restrita por domínio)
+async function askGemini(question, tasks) {
+  if (!GEMINI_API_KEY) {
+    throw new Error("A chave da API do Gemini ainda não foi configurada nesta implantação.");
+  }
+  const prompt = `Você é o assistente de tarefas do app Vivaro. Responda em português, de forma direta e útil, usando apenas as tarefas listadas abaixo como contexto. A data e hora atuais são ${new Date().toLocaleString("pt-BR")}. Se a pergunta não puder ser respondida com esses dados, diga isso claramente em vez de inventar informações.
+
+TAREFAS:
+${buildTasksContext(tasks)}
+
+PERGUNTA: ${question}`;
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
+    }
+  );
+  if (!res.ok) {
+    if (res.status === 429) throw new Error("Limite gratuito diário do Gemini atingido. Tente novamente mais tarde.");
+    throw new Error(`Erro ao consultar a IA (${res.status}).`);
+  }
+  const data = await res.json();
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "Não consegui gerar uma resposta para essa pergunta.";
+}
+
+
 function parseVoiceText(raw) {
   const text = raw.trim();
   const lower = text.toLowerCase();
@@ -449,6 +503,84 @@ function AboutModal({ onClose }) {
         <div className="px-5 py-4 text-center" style={{ borderTop: `1px solid ${C.border}` }}>
           <div className="text-xs" style={{ color: C.inkSoft }}>Vivaro</div>
           <div className="text-sm font-semibold mt-0.5" style={{ color: C.ink }}>Autor: Jonas Rios</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  AI chat — pergunte sobre suas tarefas (Gemini API)                 */
+/* ------------------------------------------------------------------ */
+function AIChatModal({ tasks, onClose }) {
+  const [messages, setMessages] = useState([
+    { id: uid(), role: "ai", text: "Olá! Pergunte sobre suas tarefas — prazos, prioridades, o que está atrasado, o que fazer primeiro, e mais." },
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const listRef = useRef(null);
+
+  useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight }); }, [messages, loading]);
+
+  const send = async () => {
+    const question = input.trim();
+    if (!question || loading) return;
+    setInput("");
+    setMessages((prev) => [...prev, { id: uid(), role: "user", text: question }]);
+    setLoading(true);
+    try {
+      const answer = await askGemini(question, tasks);
+      setMessages((prev) => [...prev, { id: uid(), role: "ai", text: answer }]);
+    } catch (err) {
+      setMessages((prev) => [...prev, { id: uid(), role: "ai", text: `⚠️ ${err.message}` }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(28,31,36,0.5)" }}>
+      <div className="w-full sm:max-w-lg h-[85vh] sm:h-[70vh] flex flex-col rounded-t-2xl sm:rounded-2xl overflow-hidden" style={{ background: C.surface }}>
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: `1px solid ${C.border}` }}>
+          <span className="font-bold text-lg inline-flex items-center gap-1.5" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
+            <Bot size={18} color={C.primary} /> Perguntar sobre tarefas
+          </span>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:opacity-60" style={{ color: C.inkSoft }}><X size={20} /></button>
+        </div>
+
+        <div ref={listRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+          {messages.map((m) => (
+            <div key={m.id} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                className="max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm whitespace-pre-wrap"
+                style={{
+                  background: m.role === "user" ? C.primary : C.surfaceSunk,
+                  color: m.role === "user" ? "#fff" : C.ink,
+                }}
+              >
+                {m.text}
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl px-3.5 py-2.5 text-sm" style={{ background: C.surfaceSunk, color: C.inkSoft }}>Pensando...</div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 px-4 py-3" style={{ borderTop: `1px solid ${C.border}` }}>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); send(); } }}
+            placeholder="Ex: o que tenho pra fazer essa semana?"
+            className="flex-1 px-3 py-2.5 rounded-xl outline-none border text-sm"
+            style={{ borderColor: C.border, color: C.ink }}
+          />
+          <button onClick={send} disabled={!input.trim() || loading} className="p-2.5 rounded-xl text-white disabled:opacity-40" style={{ background: C.primary }}>
+            <Send size={16} />
+          </button>
         </div>
       </div>
     </div>
@@ -1454,6 +1586,7 @@ export default function App() {
   const [lightbox, setLightbox] = useState(null);
   const [noteViewer, setNoteViewer] = useState(null);
   const [showAbout, setShowAbout] = useState(false);
+  const [showAIChat, setShowAIChat] = useState(false);
   const [installPrompt, setInstallPrompt] = useState(null);
   const [installVariant, setInstallVariant] = useState(null);
   const [showInstallBanner, setShowInstallBanner] = useState(true);
@@ -1689,6 +1822,9 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
+            <button onClick={() => setShowAIChat(true)} title="Perguntar sobre tarefas" className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl font-semibold text-sm" style={{ background: C.surfaceSunk, color: C.ink }}>
+              <Bot size={16} /> <span className="hidden sm:inline">IA</span>
+            </button>
             <VoiceCaptureButton onResult={handleVoiceResult} />
             <button onClick={() => setModalTask(null)} className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-semibold text-sm text-white" style={{ background: C.accent }}>
               <Plus size={16} /> <span className="hidden sm:inline">Nova tarefa</span>
@@ -1732,6 +1868,7 @@ export default function App() {
       {lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}
       {noteViewer && <NoteViewer note={noteViewer} onClose={() => setNoteViewer(null)} />}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+      {showAIChat && <AIChatModal tasks={tasks} onClose={() => setShowAIChat(false)} />}
       <ReminderToasts toasts={toasts} onDismiss={dismissToast} onExport={exportGCal} />
     </div>
   );
