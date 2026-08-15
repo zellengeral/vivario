@@ -90,7 +90,7 @@ const REMINDER_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 *
 // For safety, restrict this key by HTTP referrer to your Netlify domain in
 // Google Cloud Console → APIs & Services → Credentials.
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-flash-latest";
 
 const QUADRANTS = [
   { id: 1, label: "Fazer agora", sub: "Urgente + Importante", color: C.q1, soft: C.q1Soft },
@@ -299,6 +299,8 @@ PERGUNTA: ${question}`;
   );
   if (!res.ok) {
     if (res.status === 429) throw new Error("Limite gratuito diário do Gemini atingido. Tente novamente mais tarde.");
+    if (res.status === 404) throw new Error("Modelo de IA não encontrado (404). O nome do modelo pode ter mudado — avise para eu atualizar.");
+    if (res.status === 403) throw new Error("Acesso negado pela API (403). Confira a restrição por domínio da chave no Google Cloud Console.");
     throw new Error(`Erro ao consultar a IA (${res.status}).`);
   }
   const data = await res.json();
