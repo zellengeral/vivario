@@ -278,17 +278,9 @@ function buildTasksContext(tasks) {
 }
 
 // Chama a API do Gemini diretamente do navegador (chave restrita por domínio)
-async function askGemini(question, tasks) {
-  if (!GEMINI_API_KEY) {
-    throw new Error("A chave da API do Gemini ainda não foi configurada nesta implantação.");
-  }
-  const prompt = `Você é o assistente de tarefas do app Vivaro. Responda em português, de forma direta e útil, usando apenas as tarefas listadas abaixo como contexto. A data e hora atuais são ${new Date().toLocaleString("pt-BR")}. Se a pergunta não puder ser respondida com esses dados, diga isso claramente em vez de inventar informações.
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-TAREFAS:
-${buildTasksContext(tasks)}
-
-PERGUNTA: ${question}`;
-
+async function callGeminiOnce(prompt) {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
     {
@@ -301,11 +293,43 @@ PERGUNTA: ${question}`;
     if (res.status === 429) throw new Error("Limite gratuito diário do Gemini atingido. Tente novamente mais tarde.");
     if (res.status === 404) throw new Error("Modelo de IA não encontrado (404). O nome do modelo pode ter mudado — avise para eu atualizar.");
     if (res.status === 403) throw new Error("Acesso negado pela API (403). Confira a restrição por domínio da chave no Google Cloud Console.");
+    if (res.status === 503 || res.status === 500) {
+      const err = new Error("O servidor do Gemini está sobrecarregado no momento. Tente novamente em instantes.");
+      err.retryable = true;
+      throw err;
+    }
     throw new Error(`Erro ao consultar a IA (${res.status}).`);
   }
   const data = await res.json();
   return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "Não consegui gerar uma resposta para essa pergunta.";
 }
+
+async function askGemini(question, tasks) {
+  if (!GEMINI_API_KEY) {
+    throw new Error("A chave da API do Gemini ainda não foi configurada nesta implantação.");
+  }
+  const prompt = `Você é o assistente de tarefas do app Vivaro. Responda em português, de forma direta e útil, usando apenas as tarefas listadas abaixo como contexto. A data e hora atuais são ${new Date().toLocaleString("pt-BR")}. Se a pergunta não puder ser respondida com esses dados, diga isso claramente em vez de inventar informações.
+
+TAREFAS:
+${buildTasksContext(tasks)}
+
+PERGUNTA: ${question}`;
+
+  // Retry automatically on transient server overload (503/500), with a short backoff.
+  const delays = [1000, 2500];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await callGeminiOnce(prompt);
+    } catch (err) {
+      if (err.retryable && attempt < delays.length) {
+        await sleep(delays[attempt]);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 
 
 function parseVoiceText(raw) {
