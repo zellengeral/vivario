@@ -308,9 +308,15 @@ async function askGemini(question, tasks) {
   if (!GEMINI_API_KEY) {
     throw new Error("A chave da API do Gemini ainda não foi configurada nesta implantação.");
   }
-  const prompt = `Você é o assistente de tarefas do app Vivaro. Responda em português, de forma direta e útil, usando apenas as tarefas listadas abaixo como contexto. A data e hora atuais são ${new Date().toLocaleString("pt-BR")}. Se a pergunta não puder ser respondida com esses dados, diga isso claramente em vez de inventar informações.
+  const prompt = `Você é o assistente do app Vivaro, um app de gerenciamento de tarefas. Responda sempre em português, de forma direta e útil. A data e hora atuais são ${new Date().toLocaleString("pt-BR")}.
 
-TAREFAS:
+A lista de tarefas do usuário está abaixo. Use-a apenas para saber QUAIS tarefas existem, seus prazos, prioridades e estados — nunca invente uma tarefa que não esteja na lista.
+
+Isso NÃO significa que suas respostas devem se limitar a repetir esses dados. Se o usuário pedir ajuda para executar, resolver ou entender como fazer algo relacionado a uma tarefa (ex.: "como resolvo a tarefa X", "como consigo Y", "me ajuda com Z"), dê uma resposta prática e útil usando seu conhecimento geral sobre o assunto, como faria em qualquer conversa — a tarefa é só o contexto de QUAL problema o usuário quer resolver, não um limite do que você pode responder. Só diga que não tem informação suficiente se a pergunta depender de algum dado pessoal específico que realmente não existe em lugar nenhum (ex.: um número de conta, uma senha, um histórico privado do usuário).
+
+Se a pergunta não tiver nenhuma relação com as tarefas, responda normalmente também, usando seu conhecimento geral.
+
+TAREFAS DO USUÁRIO:
 ${buildTasksContext(tasks)}
 
 PERGUNTA: ${question}`;
@@ -540,7 +546,7 @@ function AboutModal({ onClose }) {
 /* ------------------------------------------------------------------ */
 function AIChatModal({ tasks, onClose }) {
   const [messages, setMessages] = useState([
-    { id: uid(), role: "ai", text: "Olá! Pergunte sobre suas tarefas — prazos, prioridades, o que está atrasado, o que fazer primeiro, e mais." },
+    { id: uid(), role: "ai", text: "Olá! Pergunte sobre suas tarefas — prazos, prioridades, o que está atrasado — ou qualquer outra coisa que eu possa te ajudar." },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
