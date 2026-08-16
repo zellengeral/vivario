@@ -352,25 +352,27 @@ async function askGemini(question, tasks) {
 
 REGRA MAIS IMPORTANTE SOBRE CONHECIMENTO: a lista de tarefas abaixo existe só para você saber QUAIS tarefas o usuário tem (títulos, prazos, ids) — ela NUNCA deve limitar o conteúdo da sua resposta. Se o usuário pedir ajuda para resolver, executar ou entender como fazer algo (ex.: "como resolvo isso", "como consigo X", "me ajuda com Y", mesmo mencionando o nome de uma tarefa), responda com informação real e útil sobre o assunto, usando todo o seu conhecimento geral, exatamente como faria em qualquer conversa livre — a tarefa é apenas o motivo da pergunta, não uma cerca ao redor da resposta. NUNCA responda algo como "com base apenas nas informações da tarefa, não é possível..." — isso está proibido. Só admita não saber se for algo verdadeiramente impossível de responder com conhecimento geral (ex.: um dado privado que só existiria na cabeça do usuário).
 
-VOCÊ PODE GERENCIAR TAREFAS: quando o usuário pedir para criar, alterar, marcar como concluída, adiar, mudar prioridade/categoria ou excluir uma tarefa, faça isso de verdade retornando a ação correspondente (formato abaixo), não apenas descrevendo o que ele deveria fazer manualmente no app.
+VOCÊ PODE GERENCIAR TAREFAS DE VERDADE: quando o usuário pedir para criar, alterar, marcar como concluída, adiar, mudar prioridade/categoria ou excluir uma tarefa, você DEVE incluir o objeto de ação correspondente no array "actions" — isso é o que faz a ação acontecer de verdade no app. É PROIBIDO dizer no "reply" que uma tarefa foi criada/alterada/excluída sem incluir a ação correspondente em "actions" — isso engana o usuário, já que nada seria feito de verdade. Cada pedido de gerenciamento de tarefa SEMPRE precisa de uma ação em "actions", nunca apenas texto descrevendo o que "deveria" ser feito.
 
-IDs de tarefas existentes só podem ser usados se aparecerem exatamente na lista abaixo — nunca invente um id.
+IDs de tarefas existentes só podem ser usados se aparecerem exatamente (copiados) na lista abaixo — nunca invente ou abrevie um id.
 
 Categorias válidas: "pessoal", "profissional". Prioridades (quadrant): 1=Fazer agora (urgente+importante), 2=Planejar (importante, não urgente), 3=Delegar (urgente, não importante), 4=Eliminar. Estados (status): "pendente", "em_andamento", "aguarda_tratamento", "cancelado", "concluido".
 
-Responda ESTRITAMENTE em JSON válido, sem nenhum texto fora do JSON, no formato exato:
+Responda ESTRITAMENTE em JSON válido, sem nenhum texto fora do JSON e sem markdown, no formato exato:
 {
   "reply": "sua resposta em texto para mostrar ao usuário no chat",
-  "actions": [
-    { "type": "create_task", "title": "...", "description": "...", "category": "pessoal", "quadrant": 2, "status": "pendente", "dueDate": "AAAA-MM-DD ou null", "dueTime": "HH:MM ou null" },
-    { "type": "update_task", "id": "id_exato_da_lista", "title": "...", "description": "...", "category": "...", "quadrant": 2, "status": "...", "dueDate": "AAAA-MM-DD ou null", "dueTime": "HH:MM ou null" },
-    { "type": "complete_task", "id": "id_exato_da_lista" },
-    { "type": "delete_task", "id": "id_exato_da_lista" }
-  ]
+  "actions": [ { ... } ]
 }
-Em "update_task", inclua apenas os campos que devem mudar (omita os demais). Se nenhuma ação for necessária, "actions" deve ser um array vazio [].
 
-TAREFAS DO USUÁRIO:
+Exemplos de itens válidos dentro de "actions":
+{ "type": "create_task", "title": "Comprar leite", "description": "", "category": "pessoal", "quadrant": 3, "status": "pendente", "dueDate": "2026-08-20", "dueTime": "10:00" }
+{ "type": "update_task", "id": "abc123", "dueDate": "2026-08-22", "dueTime": null }
+{ "type": "complete_task", "id": "abc123" }
+{ "type": "delete_task", "id": "abc123" }
+
+Em "update_task", inclua apenas os campos que devem mudar (omita os demais, não repita os que não mudam). Se a pergunta não pedir nenhuma alteração nas tarefas, "actions" deve ser um array vazio [].
+
+TAREFAS DO USUÁRIO (use o valor exato de "id" para referenciar uma tarefa):
 ${buildTasksContext(tasks)}
 
 PERGUNTA: ${question}`;
@@ -392,16 +394,37 @@ PERGUNTA: ${question}`;
     }
   }
 
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      reply: typeof parsed.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : "Feito.",
-      actions: Array.isArray(parsed.actions) ? parsed.actions : [],
-    };
-  } catch (e) {
-    // Resposta não veio em JSON válido (raro) — mostra o texto bruto, sem executar ações.
-    return { reply: raw || "Não consegui gerar uma resposta para essa pergunta.", actions: [] };
+  return parseAIResponse(raw);
+}
+
+// Faz o parsing da resposta da IA de forma tolerante: remove blocos de código
+// markdown que o modelo às vezes inclui mesmo em modo JSON, e tenta extrair o
+// primeiro objeto JSON válido do texto antes de desistir.
+function parseAIResponse(raw) {
+  const tryParse = (text) => {
+    try { return JSON.parse(text); } catch (e) { return null; }
+  };
+
+  let cleaned = raw.trim().replace(/^```json\s*|^```\s*|```$/gi, "").trim();
+  let parsed = tryParse(cleaned);
+
+  if (!parsed) {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start !== -1 && end !== -1 && end > start) {
+      parsed = tryParse(cleaned.slice(start, end + 1));
+    }
   }
+
+  if (!parsed) {
+    return { reply: raw || "Não consegui gerar uma resposta para essa pergunta.", actions: [], parseFailed: true };
+  }
+
+  return {
+    reply: typeof parsed.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : "Feito.",
+    actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+    parseFailed: false,
+  };
 }
 
 
@@ -612,44 +635,71 @@ function AboutModal({ onClose }) {
 /* ------------------------------------------------------------------ */
 /*  AI chat — pergunte sobre suas tarefas (Gemini API)                 */
 /* ------------------------------------------------------------------ */
+const AI_CHAT_HISTORY_KEY = "vivaro:aiChatHistory";
+const AI_GREETING = { role: "ai", text: "Olá! Pergunte sobre suas tarefas, peça ajuda pra resolver alguma delas, ou peça pra eu criar, alterar, concluir ou excluir tarefas por você." };
+
 function AIChatModal({ tasks, onCreateTask, onUpdateTask, onCompleteTask, onDeleteTask, onClose }) {
-  const [messages, setMessages] = useState([
-    { id: uid(), role: "ai", text: "Olá! Pergunte sobre suas tarefas, peça ajuda pra resolver alguma delas, ou peça pra eu criar, alterar, concluir ou excluir tarefas por você." },
-  ]);
+  const [messages, setMessages] = useState(() => {
+    try {
+      const raw = localStorage.getItem(AI_CHAT_HISTORY_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (Array.isArray(saved) && saved.length) return saved;
+      }
+    } catch (e) { /* ignore */ }
+    return [{ id: uid(), ...AI_GREETING }];
+  });
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const listRef = useRef(null);
 
   useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight }); }, [messages, loading]);
 
+  useEffect(() => {
+    try { localStorage.setItem(AI_CHAT_HISTORY_KEY, JSON.stringify(messages)); } catch (e) { /* ignore */ }
+  }, [messages]);
+
+  const clearChat = () => {
+    const fresh = [{ id: uid(), ...AI_GREETING }];
+    setMessages(fresh);
+    try { localStorage.setItem(AI_CHAT_HISTORY_KEY, JSON.stringify(fresh)); } catch (e) { /* ignore */ }
+  };
+
+  const findTaskById = (id) => {
+    const target = String(id || "").trim();
+    return tasks.find((t) => t.id === target);
+  };
+
   const applyAction = (action) => {
     try {
       if (action.type === "create_task") {
         const task = buildTaskFromAI(action);
-        if (!task.title) return null;
+        if (!task.title) return "⚠️ A IA tentou criar uma tarefa sem título — ação ignorada.";
         onCreateTask(task);
         return `✅ Tarefa criada: "${task.title}"`;
       }
-      if (action.type === "update_task" && action.id) {
-        const existing = tasks.find((t) => t.id === action.id);
-        if (!existing) return null;
+      if (action.type === "update_task") {
+        const existing = findTaskById(action.id);
+        if (!existing) return `⚠️ Não encontrei a tarefa indicada para atualizar (id: ${action.id || "vazio"}).`;
         const task = buildTaskFromAI(action, existing);
         onUpdateTask(task);
         return `✏️ Tarefa atualizada: "${task.title}"`;
       }
-      if (action.type === "complete_task" && action.id) {
-        const existing = tasks.find((t) => t.id === action.id);
-        if (!existing) return null;
-        onCompleteTask(action.id);
+      if (action.type === "complete_task") {
+        const existing = findTaskById(action.id);
+        if (!existing) return `⚠️ Não encontrei a tarefa indicada para concluir (id: ${action.id || "vazio"}).`;
+        onCompleteTask(existing.id);
         return `☑️ Tarefa concluída: "${existing.title}"`;
       }
-      if (action.type === "delete_task" && action.id) {
-        const existing = tasks.find((t) => t.id === action.id);
-        if (!existing) return null;
-        onDeleteTask(action.id);
+      if (action.type === "delete_task") {
+        const existing = findTaskById(action.id);
+        if (!existing) return `⚠️ Não encontrei a tarefa indicada para excluir (id: ${action.id || "vazio"}).`;
+        onDeleteTask(existing.id);
         return `🗑️ Tarefa excluída: "${existing.title}"`;
       }
-    } catch (e) { /* ação malformada — ignora silenciosamente */ }
+    } catch (e) {
+      return "⚠️ Não consegui aplicar uma das ações pedidas (formato inesperado).";
+    }
     return null;
   };
 
@@ -660,12 +710,13 @@ function AIChatModal({ tasks, onCreateTask, onUpdateTask, onCompleteTask, onDele
     setMessages((prev) => [...prev, { id: uid(), role: "user", text: question }]);
     setLoading(true);
     try {
-      const { reply, actions } = await askGemini(question, tasks);
+      const { reply, actions, parseFailed } = await askGemini(question, tasks);
       const confirmations = actions.map(applyAction).filter(Boolean);
       setMessages((prev) => [
         ...prev,
         { id: uid(), role: "ai", text: reply },
         ...confirmations.map((text) => ({ id: uid(), role: "system", text })),
+        ...(parseFailed ? [{ id: uid(), role: "system", text: "⚠️ A resposta veio num formato inesperado — se você pediu pra criar/alterar/excluir algo, tente reformular a pergunta." }] : []),
       ]);
     } catch (err) {
       setMessages((prev) => [...prev, { id: uid(), role: "ai", text: `⚠️ ${err.message}` }]);
@@ -681,7 +732,10 @@ function AIChatModal({ tasks, onCreateTask, onUpdateTask, onCompleteTask, onDele
           <span className="font-bold text-lg inline-flex items-center gap-1.5" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
             <Bot size={18} color={C.primary} /> Assistente
           </span>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:opacity-60" style={{ color: C.inkSoft }}><X size={20} /></button>
+          <div className="flex items-center gap-1">
+            <button onClick={clearChat} title="Limpar conversa" className="p-1.5 rounded-lg hover:opacity-60" style={{ color: C.inkSoft }}><Trash2 size={17} /></button>
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:opacity-60" style={{ color: C.inkSoft }}><X size={20} /></button>
+          </div>
         </div>
 
         <div ref={listRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
@@ -720,6 +774,7 @@ function AIChatModal({ tasks, onCreateTask, onUpdateTask, onCompleteTask, onDele
             className="flex-1 px-3 py-2.5 rounded-xl outline-none border text-sm"
             style={{ borderColor: C.border, color: C.ink }}
           />
+          <DictateFieldButton title="Perguntar por voz" onText={(t) => setInput((prev) => (prev ? `${prev} ${t}` : t))} />
           <button onClick={send} disabled={!input.trim() || loading} className="p-2.5 rounded-xl text-white disabled:opacity-40" style={{ background: C.primary }}>
             <Send size={16} />
           </button>
