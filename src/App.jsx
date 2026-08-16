@@ -128,6 +128,10 @@ const RECURRENCE_OPTIONS = [
 const WEEKDAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 
 const STORAGE_KEY = "vivaro:tasks:v2";
+// Caminho base onde o app está publicado (definido em vite.config.js). Usar isso
+// em vez de "/logo.png" etc. faz os caminhos funcionarem tanto na raiz quanto
+// numa subpasta como /vivaro/.
+const BASE = import.meta.env.BASE_URL;
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
@@ -628,7 +632,7 @@ function AboutModal({ onClose }) {
 
         <div className="p-5 space-y-5">
           <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="Vivaro" className="w-14 h-14 rounded-2xl object-contain" style={{ background: C.surfaceSunk }} />
+            <img src={`${BASE}logo.png`} alt="Vivaro" className="w-14 h-14 rounded-2xl object-contain" style={{ background: C.surfaceSunk }} />
             <div>
               <div className="font-bold text-base" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Vivaro</div>
               <div className="text-xs" style={{ color: C.inkSoft }}>Gerenciamento, controle e finalização de tarefas</div>
@@ -1932,8 +1936,8 @@ export default function App() {
             setToasts((prev) => [...prev, { id: uid(), task }]);
             fireNotification(`Lembrete: ${task.title}`, {
               body: `Prazo ${fmtDate(task.dueAt)}${fmtTime(task.dueAt) ? ` · ${fmtTime(task.dueAt)}` : ""}`.trim(),
-              icon: "/icon-192.png",
-              badge: "/icon-192.png",
+              icon: `${BASE}icon-192.png`,
+              badge: `${BASE}icon-192.png`,
               tag: key,
               vibrate: [200, 100, 200],
             });
@@ -2034,7 +2038,7 @@ export default function App() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
             <img
-              src="/logo.png" alt="Vivaro" title="Sobre o Vivaro" onClick={() => setShowAbout(true)}
+              src={`${BASE}logo.png`} alt="Vivaro" title="Sobre o Vivaro" onClick={() => setShowAbout(true)}
               className="w-9 h-9 rounded-xl object-contain cursor-pointer" style={{ background: C.surfaceSunk }}
             />
             <span className="font-bold text-lg" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Vivaro</span>
