@@ -90,7 +90,7 @@ const REMINDER_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 *
 // For safety, restrict this key by HTTP referrer to your Netlify domain in
 // Google Cloud Console → APIs & Services → Credentials.
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
+// Modelo do Gemini: ver GEMINI_MODEL_CANDIDATES mais abaixo (lista com fallback automático)
 
 const QUADRANTS = [
   { id: 1, label: "Fazer agora", sub: "Urgente + Importante", color: C.q1, soft: C.q1Soft },
@@ -305,12 +305,17 @@ function buildTaskFromAI(fields, existing) {
   return merged;
 }
 
-// Chama a API do Gemini diretamente do navegador (chave restrita por domínio)
+// Chama a API do Gemini diretamente do navegador (chave restrita por domínio).
+// Lista de modelos candidatos, do preferido ao mais antigo — se o primeiro sumir
+// (a Google renomeia modelos de tempos em tempos), o app tenta o próximo sozinho.
+const GEMINI_MODEL_CANDIDATES = ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash"];
+let workingGeminiModel = null; // cache do último modelo que funcionou nesta sessão
+
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-async function callGeminiOnce(prompt) {
+async function callGeminiOnce(prompt, model) {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -327,7 +332,11 @@ async function callGeminiOnce(prompt) {
       err.retryDelays = [4000, 10000];
       throw err;
     }
-    if (res.status === 404) throw new Error("Modelo de IA não encontrado (404). O nome do modelo pode ter mudado — avise para eu atualizar.");
+    if (res.status === 404) {
+      const err = new Error(`Modelo "${model}" não encontrado.`);
+      err.modelNotFound = true;
+      throw err;
+    }
     if (res.status === 403) throw new Error("Acesso negado pela API (403). Confira a restrição por domínio da chave no Google Cloud Console.");
     if (res.status === 503 || res.status === 500) {
       const err = new Error("O servidor do Gemini está sobrecarregado no momento. Tente novamente em instantes.");
@@ -339,6 +348,22 @@ async function callGeminiOnce(prompt) {
   }
   const data = await res.json();
   return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+}
+
+// Tenta um modelo específico, com retry automático em erros transitórios (429/503).
+async function callWithRetry(prompt, model) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await callGeminiOnce(prompt, model);
+    } catch (err) {
+      const delays = err.retryDelays || [];
+      if (err.retryable && attempt < delays.length) {
+        await sleep(delays[attempt]);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 // Pergunta ao Gemini e devolve { reply, actions } — actions são comandos que o
@@ -377,21 +402,28 @@ ${buildTasksContext(tasks)}
 
 PERGUNTA: ${question}`;
 
-  // Retry automatically on transient errors (server overload or rate limit), using
-  // the backoff delays each error type carries with it (rate limits wait longer).
+  // Tenta o modelo que já funcionou antes primeiro (se houver), depois percorre
+  // a lista de candidatos — cada um com retry automático em erros transitórios.
+  const candidates = workingGeminiModel
+    ? [workingGeminiModel, ...GEMINI_MODEL_CANDIDATES.filter((m) => m !== workingGeminiModel)]
+    : GEMINI_MODEL_CANDIDATES;
+
   let raw = "";
-  for (let attempt = 0; ; attempt++) {
+  let lastErr = null;
+  for (const model of candidates) {
     try {
-      raw = await callGeminiOnce(prompt);
+      raw = await callWithRetry(prompt, model);
+      workingGeminiModel = model;
+      lastErr = null;
       break;
     } catch (err) {
-      const delays = err.retryDelays || [];
-      if (err.retryable && attempt < delays.length) {
-        await sleep(delays[attempt]);
-        continue;
-      }
-      throw err;
+      lastErr = err;
+      if (err.modelNotFound) continue; // tenta o próximo candidato
+      throw err; // erro real (limite, permissão, etc.) — não adianta trocar de modelo
     }
+  }
+  if (lastErr) {
+    throw new Error("Nenhum modelo de IA disponível no momento (todos retornaram 404). Avise para eu atualizar a lista de modelos.");
   }
 
   return parseAIResponse(raw);
