@@ -90,7 +90,7 @@ const REMINDER_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 *
 // For safety, restrict this key by HTTP referrer to your Netlify domain in
 // Google Cloud Console → APIs & Services → Credentials.
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-const GEMINI_MODEL = "gemini-flash-latest";
+const GEMINI_MODEL = "gemini-2.5-flash-lite";
 
 const QUADRANTS = [
   { id: 1, label: "Fazer agora", sub: "Urgente + Importante", color: C.q1, soft: C.q1Soft },
@@ -272,9 +272,37 @@ function buildTasksContext(tasks) {
       const sub = (t.subtasks || []).length ? ` · subtarefas ${t.subtasks.filter((s) => s.done).length}/${t.subtasks.length}` : "";
       const resp = t.assignee ? ` · responsável: ${t.assignee}` : "";
       const rec = t.recurrence ? ` · recorrente (${recurrenceLabel(t.recurrence)})` : "";
-      return `- [${st}] ${t.title} (${t.category}, prioridade: ${q}, prazo: ${prazo}${atraso}${sub}${resp}${rec})`;
+      return `- id:${t.id} [${st}] ${t.title} (${t.category}, prioridade: ${q}, prazo: ${prazo}${atraso}${sub}${resp}${rec})`;
     })
     .join("\n");
+}
+
+// Monta/atualiza um objeto de tarefa a partir dos campos que a IA devolveu
+function buildTaskFromAI(fields, existing) {
+  const base = existing
+    ? { ...existing }
+    : {
+        id: uid(), title: "", description: "", category: "pessoal", quadrant: 2, status: "pendente",
+        dueAt: null, reminders: [], attachments: [], subtasks: [], assignee: "", watchers: [], comments: [],
+        recurrence: null, completedAt: null, createdAt: new Date().toISOString(),
+      };
+  const merged = { ...base };
+  if (typeof fields.title === "string" && fields.title.trim()) merged.title = fields.title.trim();
+  if (typeof fields.description === "string") merged.description = fields.description;
+  if (fields.category === "pessoal" || fields.category === "profissional") merged.category = fields.category;
+  const q = Number(fields.quadrant);
+  if ([1, 2, 3, 4].includes(q)) merged.quadrant = q;
+  if (STATUSES.some((s) => s.id === fields.status)) merged.status = fields.status;
+  if (fields.dueDate === null) {
+    merged.dueAt = null;
+  } else if (typeof fields.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(fields.dueDate)) {
+    const time = typeof fields.dueTime === "string" && /^\d{2}:\d{2}$/.test(fields.dueTime) ? fields.dueTime : "00:00";
+    const d = new Date(`${fields.dueDate}T${time}:00`);
+    if (!isNaN(d.getTime())) merged.dueAt = d.toISOString();
+  }
+  if (typeof fields.assignee === "string") merged.assignee = fields.assignee;
+  merged.completedAt = merged.status === "concluido" ? (merged.completedAt || new Date().toISOString()) : null;
+  return merged;
 }
 
 // Chama a API do Gemini diretamente do navegador (chave restrita por domínio)
@@ -286,53 +314,93 @@ async function callGeminiOnce(prompt) {
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: "application/json" },
+      }),
     }
   );
   if (!res.ok) {
-    if (res.status === 429) throw new Error("Limite gratuito diário do Gemini atingido. Tente novamente mais tarde.");
+    if (res.status === 429) {
+      const err = new Error("Limite de pedidos do Gemini atingido no momento (pode ser o limite por minuto — geralmente libera rápido). Tente de novo em instantes; se persistir, pode ser o limite diário gratuito.");
+      err.retryable = true;
+      err.retryDelays = [4000, 10000];
+      throw err;
+    }
     if (res.status === 404) throw new Error("Modelo de IA não encontrado (404). O nome do modelo pode ter mudado — avise para eu atualizar.");
     if (res.status === 403) throw new Error("Acesso negado pela API (403). Confira a restrição por domínio da chave no Google Cloud Console.");
     if (res.status === 503 || res.status === 500) {
       const err = new Error("O servidor do Gemini está sobrecarregado no momento. Tente novamente em instantes.");
       err.retryable = true;
+      err.retryDelays = [1000, 2500];
       throw err;
     }
     throw new Error(`Erro ao consultar a IA (${res.status}).`);
   }
   const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "Não consegui gerar uma resposta para essa pergunta.";
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
 }
 
+// Pergunta ao Gemini e devolve { reply, actions } — actions são comandos que o
+// app executa (criar/editar/concluir/excluir tarefas), permitindo que a IA
+// funcione como um assistente pessoal que gerencia as tarefas, não só responde.
 async function askGemini(question, tasks) {
   if (!GEMINI_API_KEY) {
     throw new Error("A chave da API do Gemini ainda não foi configurada nesta implantação.");
   }
-  const prompt = `Você é o assistente do app Vivaro, um app de gerenciamento de tarefas. Responda sempre em português, de forma direta e útil. A data e hora atuais são ${new Date().toLocaleString("pt-BR")}.
+  const prompt = `Você é o assistente pessoal do app Vivaro, um app de gerenciamento de tarefas. Você ajuda o usuário tanto respondendo perguntas quanto gerenciando as tarefas dele diretamente (criando, editando, concluindo ou excluindo). A data e hora atuais são ${new Date().toLocaleString("pt-BR")}.
 
-A lista de tarefas do usuário está abaixo. Use-a apenas para saber QUAIS tarefas existem, seus prazos, prioridades e estados — nunca invente uma tarefa que não esteja na lista.
+REGRA MAIS IMPORTANTE SOBRE CONHECIMENTO: a lista de tarefas abaixo existe só para você saber QUAIS tarefas o usuário tem (títulos, prazos, ids) — ela NUNCA deve limitar o conteúdo da sua resposta. Se o usuário pedir ajuda para resolver, executar ou entender como fazer algo (ex.: "como resolvo isso", "como consigo X", "me ajuda com Y", mesmo mencionando o nome de uma tarefa), responda com informação real e útil sobre o assunto, usando todo o seu conhecimento geral, exatamente como faria em qualquer conversa livre — a tarefa é apenas o motivo da pergunta, não uma cerca ao redor da resposta. NUNCA responda algo como "com base apenas nas informações da tarefa, não é possível..." — isso está proibido. Só admita não saber se for algo verdadeiramente impossível de responder com conhecimento geral (ex.: um dado privado que só existiria na cabeça do usuário).
 
-Isso NÃO significa que suas respostas devem se limitar a repetir esses dados. Se o usuário pedir ajuda para executar, resolver ou entender como fazer algo relacionado a uma tarefa (ex.: "como resolvo a tarefa X", "como consigo Y", "me ajuda com Z"), dê uma resposta prática e útil usando seu conhecimento geral sobre o assunto, como faria em qualquer conversa — a tarefa é só o contexto de QUAL problema o usuário quer resolver, não um limite do que você pode responder. Só diga que não tem informação suficiente se a pergunta depender de algum dado pessoal específico que realmente não existe em lugar nenhum (ex.: um número de conta, uma senha, um histórico privado do usuário).
+VOCÊ PODE GERENCIAR TAREFAS: quando o usuário pedir para criar, alterar, marcar como concluída, adiar, mudar prioridade/categoria ou excluir uma tarefa, faça isso de verdade retornando a ação correspondente (formato abaixo), não apenas descrevendo o que ele deveria fazer manualmente no app.
 
-Se a pergunta não tiver nenhuma relação com as tarefas, responda normalmente também, usando seu conhecimento geral.
+IDs de tarefas existentes só podem ser usados se aparecerem exatamente na lista abaixo — nunca invente um id.
+
+Categorias válidas: "pessoal", "profissional". Prioridades (quadrant): 1=Fazer agora (urgente+importante), 2=Planejar (importante, não urgente), 3=Delegar (urgente, não importante), 4=Eliminar. Estados (status): "pendente", "em_andamento", "aguarda_tratamento", "cancelado", "concluido".
+
+Responda ESTRITAMENTE em JSON válido, sem nenhum texto fora do JSON, no formato exato:
+{
+  "reply": "sua resposta em texto para mostrar ao usuário no chat",
+  "actions": [
+    { "type": "create_task", "title": "...", "description": "...", "category": "pessoal", "quadrant": 2, "status": "pendente", "dueDate": "AAAA-MM-DD ou null", "dueTime": "HH:MM ou null" },
+    { "type": "update_task", "id": "id_exato_da_lista", "title": "...", "description": "...", "category": "...", "quadrant": 2, "status": "...", "dueDate": "AAAA-MM-DD ou null", "dueTime": "HH:MM ou null" },
+    { "type": "complete_task", "id": "id_exato_da_lista" },
+    { "type": "delete_task", "id": "id_exato_da_lista" }
+  ]
+}
+Em "update_task", inclua apenas os campos que devem mudar (omita os demais). Se nenhuma ação for necessária, "actions" deve ser um array vazio [].
 
 TAREFAS DO USUÁRIO:
 ${buildTasksContext(tasks)}
 
 PERGUNTA: ${question}`;
 
-  // Retry automatically on transient server overload (503/500), with a short backoff.
-  const delays = [1000, 2500];
+  // Retry automatically on transient errors (server overload or rate limit), using
+  // the backoff delays each error type carries with it (rate limits wait longer).
+  let raw = "";
   for (let attempt = 0; ; attempt++) {
     try {
-      return await callGeminiOnce(prompt);
+      raw = await callGeminiOnce(prompt);
+      break;
     } catch (err) {
+      const delays = err.retryDelays || [];
       if (err.retryable && attempt < delays.length) {
         await sleep(delays[attempt]);
         continue;
       }
       throw err;
     }
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      reply: typeof parsed.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : "Feito.",
+      actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+    };
+  } catch (e) {
+    // Resposta não veio em JSON válido (raro) — mostra o texto bruto, sem executar ações.
+    return { reply: raw || "Não consegui gerar uma resposta para essa pergunta.", actions: [] };
   }
 }
 
@@ -544,15 +612,46 @@ function AboutModal({ onClose }) {
 /* ------------------------------------------------------------------ */
 /*  AI chat — pergunte sobre suas tarefas (Gemini API)                 */
 /* ------------------------------------------------------------------ */
-function AIChatModal({ tasks, onClose }) {
+function AIChatModal({ tasks, onCreateTask, onUpdateTask, onCompleteTask, onDeleteTask, onClose }) {
   const [messages, setMessages] = useState([
-    { id: uid(), role: "ai", text: "Olá! Pergunte sobre suas tarefas — prazos, prioridades, o que está atrasado — ou qualquer outra coisa que eu possa te ajudar." },
+    { id: uid(), role: "ai", text: "Olá! Pergunte sobre suas tarefas, peça ajuda pra resolver alguma delas, ou peça pra eu criar, alterar, concluir ou excluir tarefas por você." },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const listRef = useRef(null);
 
   useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight }); }, [messages, loading]);
+
+  const applyAction = (action) => {
+    try {
+      if (action.type === "create_task") {
+        const task = buildTaskFromAI(action);
+        if (!task.title) return null;
+        onCreateTask(task);
+        return `✅ Tarefa criada: "${task.title}"`;
+      }
+      if (action.type === "update_task" && action.id) {
+        const existing = tasks.find((t) => t.id === action.id);
+        if (!existing) return null;
+        const task = buildTaskFromAI(action, existing);
+        onUpdateTask(task);
+        return `✏️ Tarefa atualizada: "${task.title}"`;
+      }
+      if (action.type === "complete_task" && action.id) {
+        const existing = tasks.find((t) => t.id === action.id);
+        if (!existing) return null;
+        onCompleteTask(action.id);
+        return `☑️ Tarefa concluída: "${existing.title}"`;
+      }
+      if (action.type === "delete_task" && action.id) {
+        const existing = tasks.find((t) => t.id === action.id);
+        if (!existing) return null;
+        onDeleteTask(action.id);
+        return `🗑️ Tarefa excluída: "${existing.title}"`;
+      }
+    } catch (e) { /* ação malformada — ignora silenciosamente */ }
+    return null;
+  };
 
   const send = async () => {
     const question = input.trim();
@@ -561,8 +660,13 @@ function AIChatModal({ tasks, onClose }) {
     setMessages((prev) => [...prev, { id: uid(), role: "user", text: question }]);
     setLoading(true);
     try {
-      const answer = await askGemini(question, tasks);
-      setMessages((prev) => [...prev, { id: uid(), role: "ai", text: answer }]);
+      const { reply, actions } = await askGemini(question, tasks);
+      const confirmations = actions.map(applyAction).filter(Boolean);
+      setMessages((prev) => [
+        ...prev,
+        { id: uid(), role: "ai", text: reply },
+        ...confirmations.map((text) => ({ id: uid(), role: "system", text })),
+      ]);
     } catch (err) {
       setMessages((prev) => [...prev, { id: uid(), role: "ai", text: `⚠️ ${err.message}` }]);
     } finally {
@@ -575,25 +679,31 @@ function AIChatModal({ tasks, onClose }) {
       <div className="w-full sm:max-w-lg h-[85vh] sm:h-[70vh] flex flex-col rounded-t-2xl sm:rounded-2xl overflow-hidden" style={{ background: C.surface }}>
         <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: `1px solid ${C.border}` }}>
           <span className="font-bold text-lg inline-flex items-center gap-1.5" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
-            <Bot size={18} color={C.primary} /> Perguntar sobre tarefas
+            <Bot size={18} color={C.primary} /> Assistente
           </span>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:opacity-60" style={{ color: C.inkSoft }}><X size={20} /></button>
         </div>
 
         <div ref={listRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
-          {messages.map((m) => (
-            <div key={m.id} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div
-                className="max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm whitespace-pre-wrap"
-                style={{
-                  background: m.role === "user" ? C.primary : C.surfaceSunk,
-                  color: m.role === "user" ? "#fff" : C.ink,
-                }}
-              >
-                {m.text}
+          {messages.map((m) =>
+            m.role === "system" ? (
+              <div key={m.id} className="flex justify-center">
+                <div className="text-xs font-semibold px-3 py-1.5 rounded-full" style={{ background: C.primarySoft, color: C.primaryDark }}>{m.text}</div>
               </div>
-            </div>
-          ))}
+            ) : (
+              <div key={m.id} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div
+                  className="max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm whitespace-pre-wrap"
+                  style={{
+                    background: m.role === "user" ? C.primary : C.surfaceSunk,
+                    color: m.role === "user" ? "#fff" : C.ink,
+                  }}
+                >
+                  {m.text}
+                </div>
+              </div>
+            )
+          )}
           {loading && (
             <div className="flex justify-start">
               <div className="rounded-2xl px-3.5 py-2.5 text-sm" style={{ background: C.surfaceSunk, color: C.inkSoft }}>Pensando...</div>
@@ -1900,7 +2010,16 @@ export default function App() {
       {lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}
       {noteViewer && <NoteViewer note={noteViewer} onClose={() => setNoteViewer(null)} />}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
-      {showAIChat && <AIChatModal tasks={tasks} onClose={() => setShowAIChat(false)} />}
+      {showAIChat && (
+        <AIChatModal
+          tasks={tasks}
+          onCreateTask={saveTask}
+          onUpdateTask={saveTask}
+          onCompleteTask={(id) => changeStatus(id, "concluido")}
+          onDeleteTask={deleteTask}
+          onClose={() => setShowAIChat(false)}
+        />
+      )}
       <ReminderToasts toasts={toasts} onDismiss={dismissToast} onExport={exportGCal} />
     </div>
   );
