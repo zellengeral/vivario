@@ -1,5 +1,5 @@
 const CACHE_NAME = "vivaro-cache-v1";
-const APP_SHELL = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png"];
+const APP_SHELL = ["/vivaro/", "/vivaro/index.html", "/vivaro/manifest.json", "/vivaro/icon-192.png", "/vivaro/icon-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -27,7 +27,7 @@ self.addEventListener("fetch", (event) => {
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, resClone)).catch(() => {});
         return res;
       })
-      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/index.html")))
+      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/vivaro/index.html")))
   );
 });
 
@@ -37,7 +37,7 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
       if (clients.length > 0) return clients[0].focus();
-      return self.clients.openWindow("/");
+      return self.clients.openWindow("/vivaro/");
     })
   );
 });

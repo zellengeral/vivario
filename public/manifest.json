@@ -2,17 +2,17 @@
   "name": "Vivaro — Gerenciamento de tarefas",
   "short_name": "Vivaro",
   "description": "Gerenciamento, controle e finalização de tarefas pessoais e profissionais com Kanban e matriz de Eisenhower.",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "/vivaro/",
+  "scope": "/vivaro/",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#F6F5F1",
   "theme_color": "#0F6E5E",
   "lang": "pt-BR",
   "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
-    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    { "src": "/vivaro/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/vivaro/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/vivaro/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/vivaro/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
